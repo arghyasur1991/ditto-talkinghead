@@ -7,6 +7,7 @@ import torch
 import pickle
 
 from stream_pipeline_offline import StreamSDK
+from core.utils.device_utils import detect_device, get_recommended_config, print_device_info
 
 
 def seed_everything(seed):
@@ -22,6 +23,50 @@ def seed_everything(seed):
 def load_pkl(pkl):
     with open(pkl, "rb") as f:
         return pickle.load(f)
+
+
+def auto_select_config(cfg_pkl_arg, data_root_arg):
+    """
+    Automatically select the best configuration based on available hardware.
+    """
+    device, model_format = detect_device()
+    
+    # If user provided specific config, use it
+    if cfg_pkl_arg and os.path.exists(cfg_pkl_arg):
+        return cfg_pkl_arg, data_root_arg
+    
+    # Auto-select based on device
+    config_dir = "./checkpoints/ditto_cfg"
+    
+    if device == "cuda":
+        # Use TensorRT if available
+        trt_config = os.path.join(config_dir, "v0.4_hubert_cfg_trt.pkl")
+        if os.path.exists(trt_config):
+            return trt_config, "./checkpoints/ditto_trt_Ampere_Plus"
+        else:
+            print("Warning: TensorRT config not found, falling back to ONNX")
+            device = "cpu"
+    
+    if device == "mps":
+        # Try MPS hybrid config first
+        mps_config = os.path.join(config_dir, "v0.4_hubert_cfg_mps.pkl")
+        if os.path.exists(mps_config):
+            return mps_config, "./checkpoints/ditto_onnx"
+        else:
+            print("Warning: MPS config not found, falling back to ONNX")
+            device = "cpu"
+    
+    if device == "cpu" or model_format == "onnx":
+        # Use ONNX config
+        onnx_config = os.path.join(config_dir, "v0.4_hubert_cfg_onnx.pkl")
+        if os.path.exists(onnx_config):
+            return onnx_config, "./checkpoints/ditto_onnx"
+        else:
+            print("Warning: ONNX config not found, using original TensorRT config")
+            return os.path.join(config_dir, "v0.4_hubert_cfg_trt.pkl"), data_root_arg or "./checkpoints/ditto_trt_Ampere_Plus"
+    
+    # Fallback to original
+    return cfg_pkl_arg or os.path.join(config_dir, "v0.4_hubert_cfg_trt.pkl"), data_root_arg or "./checkpoints/ditto_trt_Ampere_Plus"
 
 
 def run(SDK: StreamSDK, audio_path: str, source_path: str, output_path: str, more_kwargs: str | dict = {}):
@@ -66,17 +111,52 @@ def run(SDK: StreamSDK, audio_path: str, source_path: str, output_path: str, mor
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="./checkpoints/ditto_trt_Ampere_Plus", help="path to trt data_root")
-    parser.add_argument("--cfg_pkl", type=str, default="./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl", help="path to cfg_pkl")
+    parser.add_argument("--data_root", type=str, default=None, help="path to model data_root (auto-detected if not provided)")
+    parser.add_argument("--cfg_pkl", type=str, default=None, help="path to cfg_pkl (auto-detected if not provided)")
+    parser.add_argument("--device", type=str, default=None, choices=["cuda", "mps", "cpu"], help="force specific device (auto-detected if not provided)")
+    parser.add_argument("--print_device_info", action="store_true", help="print device information and exit")
 
     parser.add_argument("--audio_path", type=str, help="path to input wav")
     parser.add_argument("--source_path", type=str, help="path to input image")
     parser.add_argument("--output_path", type=str, help="path to output mp4")
     args = parser.parse_args()
 
+    # Print device info if requested
+    if args.print_device_info:
+        print_device_info()
+        exit(0)
+
+    # Auto-detect device and configuration
+    if args.device:
+        print(f"Using forced device: {args.device}")
+        device = args.device
+    else:
+        device, model_format = detect_device()
+        print(f"Auto-detected device: {device} (model format: {model_format})")
+
+    # Auto-select configuration
+    cfg_pkl, data_root = auto_select_config(args.cfg_pkl, args.data_root)
+    print(f"Using config: {cfg_pkl}")
+    print(f"Using data root: {data_root}")
+
+    # Validate paths
+    if not os.path.exists(cfg_pkl):
+        print(f"Error: Config file not found: {cfg_pkl}")
+        print("Please run: python scripts/create_mac_arm_config.py")
+        exit(1)
+
+    if not os.path.exists(data_root):
+        print(f"Error: Data root not found: {data_root}")
+        print("Please ensure you have downloaded the checkpoints from HuggingFace")
+        exit(1)
+
+    # Validate input arguments
+    if not args.audio_path or not args.source_path or not args.output_path:
+        print("Error: audio_path, source_path, and output_path are required")
+        parser.print_help()
+        exit(1)
+
     # init sdk
-    data_root = args.data_root   # model dir
-    cfg_pkl = args.cfg_pkl     # cfg pkl
     SDK = StreamSDK(cfg_pkl, data_root)
 
     # input args
