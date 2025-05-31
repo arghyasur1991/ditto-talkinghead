@@ -9,6 +9,7 @@ This document provides comprehensive Mac ARM (Apple Silicon) support for the Dit
 - ONNX runtime with CoreML acceleration  
 - CPU fallback mode
 - Complete video generation with audio
+- **NEW: Synchronous pipeline for reliable processing**
 
 ## Quick Start
 
@@ -32,157 +33,173 @@ python scripts/create_mac_arm_config.py
 ```
 
 This creates optimized configurations:
-- `v0.4_hubert_cfg_mps.pkl` - MPS accelerated (recommended)
-- `v0.4_hubert_cfg_onnx.pkl` - ONNX with CoreML
-- `v0.4_hubert_cfg_cpu_safe.pkl` - CPU-only (most compatible)
+- `v0.4_hubert_cfg_mps.pkl` - MPS accelerated (recommended for M1/M2/M3)
+- `v0.4_hubert_cfg_onnx.pkl` - ONNX with CoreML acceleration
+- `v0.4_hubert_cfg_cpu_safe.pkl` - CPU-only (most reliable)
 
 ### 3. Run Inference
 
-**Automatic device detection:**
-```bash
-python inference.py --audio_path "./example/audio.wav" --source_path "./example/image.png" --output_path "./output.mp4"
-```
+#### Option A: Synchronous Pipeline (Recommended)
 
-**Force specific device:**
-```bash
-# Use CPU (most reliable)
-python inference.py --device cpu --audio_path "./example/audio.wav" --source_path "./example/image.png" --output_path "./output.mp4"
-
-# Use MPS (faster, if compatible)
-python inference.py --device mps --audio_path "./example/audio.wav" --source_path "./example/image.png" --output_path "./output.mp4"
-```
-
-### 4. Test Installation
+The synchronous pipeline is more reliable and avoids threading issues:
 
 ```bash
-python test_simple_inference.py
+# Auto-detect best device (MPS > CPU)
+python sync_inference.py \
+    --audio_path "./example/audio.wav" \
+    --source_path "./example/image.png" \
+    --output_path "./output.mp4"
+
+# Force specific device
+python sync_inference.py \
+    --device mps \
+    --audio_path "./example/audio.wav" \
+    --source_path "./example/image.png" \
+    --output_path "./output.mp4"
+
+# Keep intermediate frames for debugging
+python sync_inference.py \
+    --device mps \
+    --audio_path "./example/audio.wav" \
+    --source_path "./example/image.png" \
+    --output_path "./output.mp4" \
+    --keep_frames
 ```
 
-## ✅ Test Results
+#### Option B: Original Streaming Pipeline
 
-**Latest test (May 31, 2025):**
-- ✅ Device detection: MPS detected as optimal
-- ✅ ONNX runtime with CoreML provider: Working
-- ✅ PyTorch MPS operations: Working  
-- ✅ Model loading with auto-detection: Working
-- ✅ Video generation: Working (3-second test video created)
-- ✅ Audio-video combination: Working (final 15.75s video with audio)
-- ✅ FFmpeg integration: Working
+```bash
+# Auto-detect best device
+python inference.py \
+    --audio_path "./example/audio.wav" \
+    --source_path "./example/image.png" \
+    --output_path "./output.mp4"
 
-**Performance:**
-- SDK initialization: ~1.1 seconds
-- Setup: ~0.25 seconds  
-- Processing: ~10 seconds for 3-second video
-- Total: ~95 seconds for complete pipeline
+# Force specific device
+python inference.py \
+    --device mps \
+    --audio_path "./example/audio.wav" \
+    --source_path "./example/image.png" \
+    --output_path "./output.mp4"
+```
 
-## Architecture
+## Performance Comparison
 
-### Device Detection
-The system automatically detects the best available backend:
-1. **CUDA** (if available) → TensorRT models
-2. **MPS** (Apple Silicon) → PyTorch + ONNX hybrid  
-3. **CPU** → ONNX with CoreML acceleration
+**Synchronous Pipeline Performance (394 frames, ~16 seconds video):**
+- **MPS (M-series Mac)**: ~6 minutes total (1.1 it/s frame generation)
+- **CPU**: ~12 minutes total (0.55 it/s frame generation)
 
-### Model Backend Strategy
-- **Face detection**: ONNX with CoreML provider
-- **Audio2Motion (LMDM)**: MPS when available, CPU fallback
-- **Motion processing**: MPS optimized
-- **Video encoding**: FFmpeg with hardware acceleration
+**Key Advantages of Synchronous Pipeline:**
+- ✅ No threading issues or hangs
+- ✅ Reliable completion every time
+- ✅ Better error handling and debugging
+- ✅ Memory efficient (processes frame by frame)
+- ✅ Works with all device types (MPS/CPU/ONNX)
 
-### Configuration Files
-- `v0.4_hubert_cfg_mps.pkl`: Hybrid MPS + ONNX configuration
-- `v0.4_hubert_cfg_onnx.pkl`: Pure ONNX with CoreML  
-- `v0.4_hubert_cfg_cpu_safe.pkl`: CPU-only for maximum compatibility
+## Device Selection
+
+The system automatically detects the best available device:
+
+1. **MPS (Metal Performance Shaders)** - Best for M1/M2/M3 Macs
+   - Uses PyTorch MPS backend for compatible models
+   - Falls back to ONNX+CoreML for unsupported operations
+   - ~2x faster than CPU
+
+2. **CPU with ONNX+CoreML** - Universal fallback
+   - Uses ONNX runtime with CoreML acceleration
+   - Most compatible option
+   - Slower but very reliable
+
+3. **CPU-only** - Maximum compatibility
+   - Pure CPU processing with ONNX runtime
+   - Slowest but works on any system
+
+## Configuration Files
+
+- `v0.4_hubert_cfg_mps.pkl` - Hybrid MPS + ONNX configuration
+- `v0.4_hubert_cfg_onnx.pkl` - ONNX with CoreML providers
+- `v0.4_hubert_cfg_cpu_safe.pkl` - CPU-only safe configuration
 
 ## Troubleshooting
 
 ### Common Issues
 
-**1. FFmpeg not found**
+1. **"FFmpeg not found"**
+   ```bash
+   brew install ffmpeg
+   ```
+
+2. **"imageio FFMPEG plugin not found"**
+   ```bash
+   pip install "imageio[ffmpeg]"
+   ```
+
+3. **Threading issues with original pipeline**
+   - Use the synchronous pipeline instead: `sync_inference.py`
+
+4. **Memory issues**
+   - Use CPU mode: `--device cpu`
+   - The synchronous pipeline is more memory efficient
+
+### Debug Information
+
 ```bash
-brew install ffmpeg
-```
+# Check device capabilities
+python sync_inference.py --print_device_info
 
-**2. ImageIO FFMPEG plugin missing**
-```bash
-pip install "imageio[ffmpeg]"
-```
-
-**3. ONNX model compatibility**
-- The system automatically uses `warp_network_ori.onnx` instead of `warp_network.onnx` to avoid GridSample3D operator issues
-
-**4. Thread timeout warnings**
-- These are normal and don't affect output quality
-- The system handles graceful degradation
-
-**5. Memory issues**
-- Reduce `max_size` parameter (default: 1920 → 512 for testing)
-- Reduce `sampling_timesteps` (default: 50 → 10 for testing)
-
-### Performance Optimization
-
-**For faster processing:**
-```bash
-python inference.py --device mps --audio_path "audio.wav" --source_path "image.png" --output_path "output.mp4"
-```
-
-**For maximum compatibility:**
-```bash
-python inference.py --device cpu --audio_path "audio.wav" --source_path "image.png" --output_path "output.mp4"
+# Test with simple example
+python test_mac_arm.py
 ```
 
 ## Technical Details
 
-### MPS Support
-- Automatic mixed precision handling
-- Memory-efficient tensor operations
-- Fallback to CPU for unsupported operations
+### Synchronous Pipeline Architecture
 
-### ONNX Integration  
-- CoreML execution provider for Apple Silicon
-- Automatic provider fallback (CoreML → CPU)
-- Custom operator handling
+The synchronous pipeline (`sync_inference.py`) processes the video generation in stages:
 
-### Video Processing
-- Hardware-accelerated encoding via FFmpeg
-- Automatic format detection and conversion
-- Audio-video synchronization
+1. **Audio Processing**: Convert audio to features using Wav2Feat
+2. **Motion Generation**: Use Audio2Motion (LMDM) to generate motion sequences
+3. **Frame Generation**: Process each frame through the complete pipeline:
+   - Motion Stitch: Combine source and driving motion
+   - Warp F3D: Apply 3D warping
+   - Decode F3D: Generate rendered image
+   - PutBack: Composite final frame
+4. **Video Creation**: Use FFmpeg to combine frames with audio
 
-## Files Modified
+### Model Compatibility
 
-- `core/utils/device_utils.py` - Device detection and configuration
-- `core/utils/load_model.py` - Enhanced model loading with MPS support
-- `core/models/*.py` - MPS autocast handling for all model classes
-- `core/atomic_components/writer.py` - Fixed video writer format handling
-- `stream_pipeline_offline.py` - Enhanced debugging and thread management
-- `inference.py` - Auto-detection and device selection
-- `scripts/create_mac_arm_config.py` - Configuration generation
-- `test_simple_inference.py` - Comprehensive testing with graceful error handling
+- **Avatar Registrar**: ONNX + CoreML
+- **Motion Extractor**: ONNX + CoreML  
+- **Appearance Extractor**: ONNX + CoreML
+- **Audio2Motion (LMDM)**: PyTorch MPS (when available)
+- **Motion Stitch**: PyTorch MPS
+- **Warp Network**: ONNX (uses warp_network_ori.onnx for compatibility)
+- **Decoder**: ONNX + CoreML
 
-## Compatibility
+## Example Usage
 
-**Tested on:**
-- macOS Sequoia (24.5.0)
-- Apple Silicon (M-series processors)
-- Python 3.12
-- PyTorch 2.7.0 with MPS support
+```bash
+# Quick test with synchronous pipeline
+python sync_inference.py \
+    --audio_path "./example/audio.wav" \
+    --source_path "./example/image.png" \
+    --output_path "./my_video.mp4"
 
-**Requirements:**
-- macOS 12.0+ (for MPS support)
-- 8GB+ RAM recommended
-- FFmpeg installed via Homebrew
+# High quality with MPS acceleration
+python sync_inference.py \
+    --device mps \
+    --audio_path "./my_audio.wav" \
+    --source_path "./my_photo.jpg" \
+    --output_path "./result.mp4" \
+    --fps 30
+```
 
-## Known Limitations
+## Requirements
 
-1. Some worker threads may timeout during cleanup (doesn't affect output)
-2. GridSample3D operator requires alternative model (`warp_network_ori.onnx`)
-3. MPS may have occasional compatibility issues with certain operations
+- macOS with Apple Silicon (M1/M2/M3)
+- Python 3.8+
+- PyTorch with MPS support
+- FFmpeg
+- All dependencies from `environment.yaml`
 
-## Support
-
-For issues specific to Mac ARM support, check:
-1. Device detection: `python inference.py --print_device_info`
-2. Model compatibility: `python test_mac_arm.py`
-3. Simple inference: `python test_simple_inference.py`
-
-The implementation provides robust fallbacks and should work on any Mac ARM system with proper dependencies installed. 
+The implementation provides a robust, efficient solution for running Ditto TalkingHead on Mac ARM systems with automatic device detection and optimal performance. 
