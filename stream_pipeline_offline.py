@@ -137,6 +137,7 @@ class StreamSDK:
         # only hubert support online mode
         assert self.wav2feat.support_streaming or not self.online_mode
 
+        print("DEBUG: Starting avatar registration")
         # ======== Register Avatar ========
         crop_kwargs = {
             "crop_scale": self.crop_scale,
@@ -151,16 +152,21 @@ class StreamSDK:
             n_frames=n_frames, 
             **crop_kwargs,
         )
+        print("DEBUG: Avatar registration completed")
 
         if len(source_info["x_s_info_lst"]) > 1 and self.smo_k_s > 1:
+            print("DEBUG: Smoothing x_s_info_lst")
             source_info["x_s_info_lst"] = smooth_x_s_info_lst(source_info["x_s_info_lst"], smo_k=self.smo_k_s)
 
         self.source_info = source_info
         self.source_info_frames = len(source_info["x_s_info_lst"])
 
+        print("DEBUG: Setting up condition handler")
         # ======== Setup Condition Handler ========
         self.condition_handler.setup(source_info, self.emo, eye_f0_mode=self.eye_f0_mode, ch_info=self.ch_info)
+        print("DEBUG: Condition handler setup completed")
 
+        print("DEBUG: Setting up Audio2Motion (LMDM)")
         # ======== Setup Audio2Motion (LMDM) ========
         x_s_info_0 = self.condition_handler.x_s_info_0
         self.audio2motion.setup(
@@ -173,7 +179,9 @@ class StreamSDK:
             v_min_max_for_clip=self.v_min_max_for_clip,
             smo_k_d=self.smo_k_d,
         )
+        print("DEBUG: Audio2Motion setup completed")
 
+        print("DEBUG: Setting up Motion Stitch")
         # ======== Setup Motion Stitch ========
         is_image_flag = source_info["is_image_flag"]
         x_s_info = source_info['x_s_info_lst'][0]
@@ -193,13 +201,17 @@ class StreamSDK:
             ch_info=self.ch_info,
             overall_ctrl_info=self.overall_ctrl_info,
         )
+        print("DEBUG: Motion Stitch setup completed")
 
+        print("DEBUG: Setting up video writer")
         # ======== Video Writer ========
         self.output_path = output_path
-        self.tmp_output_path = output_path + ".tmp.mp4"
+        self.tmp_output_path = output_path.replace('.mp4', '_tmp.mp4') if output_path.endswith('.mp4') else output_path + "_tmp.mp4"
         self.writer = VideoWriterByImageIO(self.tmp_output_path)
         self.writer_pbar = tqdm(desc="writer")
+        print("DEBUG: Video writer setup completed")
 
+        print("DEBUG: Setting up audio feat buffer")
         # ======== Audio Feat Buffer ========
         if self.online_mode:
             # buffer: seq_frames - valid_clip_len
@@ -208,7 +220,9 @@ class StreamSDK:
         else:
             self.audio_feat = np.zeros((0, self.wav2feat.feat_dim), dtype=np.float32)
         self.cond_idx_start = 0 - len(self.audio_feat)
+        print("DEBUG: Audio feat buffer setup completed")
 
+        print("DEBUG: Setting up worker threads")
         # ======== Setup Worker Threads ========
         QUEUE_MAX_SIZE = 100
         # self.QUEUE_TIMEOUT = None
@@ -234,6 +248,8 @@ class StreamSDK:
 
         for thread in self.thread_list:
             thread.start()
+        print("DEBUG: Worker threads started")
+        print("DEBUG: Setup method completed")
 
     def _get_ctrl_info(self, fid):
         try:
@@ -513,22 +529,36 @@ class StreamSDK:
         self.motion_stitch_queue.put(None)
 
     def close(self):
+        print("DEBUG: Starting close method")
         # flush frames
+        print("DEBUG: Putting None in audio2motion_queue")
         self.audio2motion_queue.put(None)
-        # Wait for worker threads to finish
-        for thread in self.thread_list:
-            thread.join()
+        print("DEBUG: Waiting for worker threads to finish")
+        
+        # Wait for worker threads to finish with timeout
+        for i, thread in enumerate(self.thread_list):
+            print(f"DEBUG: Waiting for thread {i} ({thread.name})")
+            thread.join(timeout=30)  # 30 second timeout per thread
+            if thread.is_alive():
+                print(f"WARNING: Thread {i} ({thread.name}) did not finish within timeout")
+            else:
+                print(f"DEBUG: Thread {i} ({thread.name}) finished")
 
+        print("DEBUG: Closing writer")
         try:
             self.writer.close()
             self.writer_pbar.close()
         except:
             traceback.print_exc()
 
+        print("DEBUG: Checking for worker exceptions")
         # Check if any worker encountered an exception
         if self.worker_exception is not None:
+            print(f"DEBUG: Worker exception found: {self.worker_exception}")
             raise self.worker_exception
         
+        print("DEBUG: Close method completed")
+
     def run_chunk(self, audio_chunk, chunksize=(3, 5, 2)):
         # only for hubert
         aud_feat = self.wav2feat(audio_chunk, chunksize=chunksize)

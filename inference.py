@@ -25,11 +25,20 @@ def load_pkl(pkl):
         return pickle.load(f)
 
 
-def auto_select_config(cfg_pkl_arg, data_root_arg):
+def auto_select_config(cfg_pkl_arg, data_root_arg, forced_device=None):
     """
     Automatically select the best configuration based on available hardware.
     """
-    device, model_format = detect_device()
+    if forced_device:
+        device = forced_device
+        if device == "cuda":
+            model_format = "tensorrt"
+        elif device == "mps":
+            model_format = "pytorch"
+        else:
+            model_format = "onnx"
+    else:
+        device, model_format = detect_device()
     
     # If user provided specific config, use it
     if cfg_pkl_arg and os.path.exists(cfg_pkl_arg):
@@ -57,7 +66,12 @@ def auto_select_config(cfg_pkl_arg, data_root_arg):
             device = "cpu"
     
     if device == "cpu" or model_format == "onnx":
-        # Use ONNX config
+        # Try CPU-safe config first (most reliable)
+        cpu_safe_config = os.path.join(config_dir, "v0.4_hubert_cfg_cpu_safe.pkl")
+        if os.path.exists(cpu_safe_config):
+            return cpu_safe_config, "./checkpoints/ditto_onnx"
+        
+        # Fallback to regular ONNX config
         onnx_config = os.path.join(config_dir, "v0.4_hubert_cfg_onnx.pkl")
         if os.path.exists(onnx_config):
             return onnx_config, "./checkpoints/ditto_onnx"
@@ -70,40 +84,61 @@ def auto_select_config(cfg_pkl_arg, data_root_arg):
 
 
 def run(SDK: StreamSDK, audio_path: str, source_path: str, output_path: str, more_kwargs: str | dict = {}):
+    print("DEBUG: Starting run function")
 
     if isinstance(more_kwargs, str):
         more_kwargs = load_pkl(more_kwargs)
     setup_kwargs = more_kwargs.get("setup_kwargs", {})
     run_kwargs = more_kwargs.get("run_kwargs", {})
 
+    print("DEBUG: Calling SDK.setup")
     SDK.setup(source_path, output_path, **setup_kwargs)
+    print("DEBUG: SDK.setup completed")
 
+    print("DEBUG: Loading audio")
     audio, sr = librosa.core.load(audio_path, sr=16000)
     num_f = math.ceil(len(audio) / 16000 * 25)
+    print(f"DEBUG: Audio loaded, {len(audio)} samples, {num_f} frames")
 
     fade_in = run_kwargs.get("fade_in", -1)
     fade_out = run_kwargs.get("fade_out", -1)
     ctrl_info = run_kwargs.get("ctrl_info", {})
+    print("DEBUG: Calling SDK.setup_Nd")
     SDK.setup_Nd(N_d=num_f, fade_in=fade_in, fade_out=fade_out, ctrl_info=ctrl_info)
+    print("DEBUG: SDK.setup_Nd completed")
 
     online_mode = SDK.online_mode
+    print(f"DEBUG: Online mode: {online_mode}")
+    
     if online_mode:
+        print("DEBUG: Running in online mode")
         chunksize = run_kwargs.get("chunksize", (3, 5, 2))
         audio = np.concatenate([np.zeros((chunksize[0] * 640,), dtype=np.float32), audio], 0)
         split_len = int(sum(chunksize) * 0.04 * 16000) + 80  # 6480
         for i in range(0, len(audio), chunksize[1] * 640):
+            print(f"DEBUG: Processing chunk {i//chunksize[1]//640}")
             audio_chunk = audio[i:i + split_len]
             if len(audio_chunk) < split_len:
                 audio_chunk = np.pad(audio_chunk, (0, split_len - len(audio_chunk)), mode="constant")
             SDK.run_chunk(audio_chunk, chunksize)
     else:
+        print("DEBUG: Running in offline mode")
+        print("DEBUG: Converting audio to features")
         aud_feat = SDK.wav2feat.wav2feat(audio)
+        print(f"DEBUG: Audio features shape: {aud_feat.shape}")
+        print("DEBUG: Putting audio features in queue")
         SDK.audio2motion_queue.put(aud_feat)
+        print("DEBUG: Audio features queued")
+    
+    print("DEBUG: Calling SDK.close")
     SDK.close()
+    print("DEBUG: SDK.close completed")
 
+    print("DEBUG: Running ffmpeg")
     cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{audio_path}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
     print(cmd)
     os.system(cmd)
+    print("DEBUG: ffmpeg completed")
 
     print(output_path)
 
@@ -135,7 +170,7 @@ if __name__ == "__main__":
         print(f"Auto-detected device: {device} (model format: {model_format})")
 
     # Auto-select configuration
-    cfg_pkl, data_root = auto_select_config(args.cfg_pkl, args.data_root)
+    cfg_pkl, data_root = auto_select_config(args.cfg_pkl, args.data_root, args.device)
     print(f"Using config: {cfg_pkl}")
     print(f"Using data root: {data_root}")
 
@@ -156,8 +191,13 @@ if __name__ == "__main__":
         parser.print_help()
         exit(1)
 
+    # Create output directory
+    os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
+
+    print("DEBUG: Initializing SDK")
     # init sdk
     SDK = StreamSDK(cfg_pkl, data_root)
+    print("DEBUG: SDK initialized")
 
     # input args
     audio_path = args.audio_path    # .wav
@@ -166,4 +206,5 @@ if __name__ == "__main__":
 
     # run
     # seed_everything(1024)
+    print("DEBUG: Starting inference")
     run(SDK, audio_path, source_path, output_path)
